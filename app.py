@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
+import json
 
 st.set_page_config(page_title="Demo")
 
@@ -116,6 +118,40 @@ def train_model(df: pd.DataFrame):
     return model, meta
 
 
+def save_artifacts(model: MylinearRegression, meta: dict, mse: float | None = None):
+    os.makedirs("artifacts", exist_ok=True)
+    # save model as json (coef and intercept)
+    model_path = os.path.join("artifacts", "model.json")
+    meta_path = os.path.join("artifacts", "meta.json")
+    with open(model_path, "w") as f:
+        json.dump({"intercept": model.intercept_, "coef": model.coef_.tolist()}, f)
+    with open(meta_path, "w") as f:
+        json.dump({**meta, "mse": mse}, f)
+    if mse is not None:
+        metrics_csv = os.path.join("artifacts", "metrics.csv")
+        header_needed = not os.path.exists(metrics_csv)
+        with open(metrics_csv, "a") as f:
+            if header_needed:
+                f.write("mse\n")
+            f.write(f"{mse}\n")
+
+
+def load_artifacts():
+    model_path = os.path.join("artifacts", "model.json")
+    meta_path = os.path.join("artifacts", "meta.json")
+    if not (os.path.exists(model_path) and os.path.exists(meta_path)):
+        return None, None
+    with open(model_path, "r") as f:
+        m = json.load(f)
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+    mdl = MylinearRegression()
+    mdl.intercept_ = float(m["intercept"]) if m.get("intercept") is not None else 0.0
+    mdl.coef_ = np.array(m.get("coef", []), dtype=float)
+    mdl.is_fitted = True
+    return mdl, meta
+
+
 df = load_data("./datasets/sport_cars.csv")
 model, meta = train_model(df)
 
@@ -136,4 +172,31 @@ if st.button("Predict"):
     features = np.array([[row[c] for c in meta["feature_cols"]]], dtype=float)
     pred = float(model.predict(features)[0])
     st.success(f"The predicted price is ${pred:,.0f}")
+
+with st.sidebar:
+    st.subheader("MLOps")
+    if st.button("Load latest model"):
+        loaded, loaded_meta = load_artifacts()
+        if loaded is not None:
+            model = loaded
+            meta = loaded_meta
+            st.success("Loaded model from artifacts/")
+        else:
+            st.warning("No saved artifacts found.")
+
+    if st.button("Save model"):
+        # compute a quick MSE on training data for logging
+        make_codes = df["Car Make"].map(meta["make_to_code"]).astype(float)
+        X_log = pd.DataFrame({
+            "Year": df["Year"].astype(float),
+            "Engine Size (L)": df["Engine Size (L)"].astype(float),
+            "Horsepower": df["Horsepower"].astype(float),
+            "Car Make": make_codes,
+        })
+        X_log = X_log[meta["feature_cols"]].to_numpy(dtype=float)
+        y_log = pd.to_numeric(df["Price (in USD)"], errors="coerce").to_numpy(dtype=float)
+        mask = ~np.isnan(X_log).any(axis=1) & ~np.isnan(y_log)
+        mse = float(((y_log[mask] - model.predict(X_log[mask])) ** 2).mean())
+        save_artifacts(model, meta, mse)
+        st.success(f"Saved model with MSE={mse:.2f}")
 
